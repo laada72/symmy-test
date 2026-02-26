@@ -25,4 +25,5 @@ services:
     environment:
       - DATABASE_URL=postgres://postgres:postgres@db:5432/symmy_task
       - CELERY_BROKER_URL=redis://redis:6379/0
-    depends_on: [db, redis]
+      - ESHOP_API_BASE_URL=http://web:8000/v1/products/
+    depends_on: [db, redis, web]
