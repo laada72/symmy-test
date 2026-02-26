@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django_extensions',
+    'integrator',
 ]
 
 MIDDLEWARE = [
@@ -124,3 +125,10 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Celery
+CELERY_BROKER_URL = "redis://redis:6379/0"
+
+# E-shop API
+ESHOP_API_BASE_URL = "https://api.fake-eshop.cz/v1/products/"
+ESHOP_API_KEY = "symma-secret-token"

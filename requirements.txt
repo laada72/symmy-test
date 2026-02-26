@@ -8,3 +8,5 @@ pytest
 pytest-django
 responses
 environs
+hypothesis
+fakeredis
