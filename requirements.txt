@@ -1,0 +1,10 @@
+django>=4.2
+djangorestframework
+django-extensions
+celery[redis]
+psycopg2-binary
+requests
+pytest
+pytest-django
+responses
+environs

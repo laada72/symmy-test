@@ -1,0 +1,9 @@
+[
+    {"id": "SKU-001", "title": "Kávovar Espresso", "price_vat_excl": 12400.5, "stocks": {"praha": 5, "brno": 3}, "attributes": {"color": "stříbrná"}},
+    {"id": "SKU-002", "title": "Sleva - chyba", "price_vat_excl": -150.0, "stocks": {"praha": 10}, "attributes": {}},
+    {"id": "SKU-003", "title": "Mlýnek", "price_vat_excl": 1500, "stocks": {"externi": 50}, "attributes": null},
+    {"id": "SKU-004", "title": "Hrnek", "price_vat_excl": null, "stocks": {"praha": 10}, "attributes": {"color": "černá"}},
+    {"id": "SKU-006", "title": "Tablety", "price_vat_excl": 250, "stocks": {"praha": 100}, "attributes": {}},
+    {"id": "SKU-006", "title": "Tablety", "price_vat_excl": 250, "stocks": {"praha": 100}, "attributes": {}},
+    {"id": "SKU-008", "title": "Filtry", "price_vat_excl": 300, "stocks": {"praha": "N/A"}, "attributes": {"color": "bílá"}}
+  ]

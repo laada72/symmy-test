@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=symmy_task
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - "5433:5432"
+  redis:
+    image: redis:7-alpine
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes: ['.:/app']
+    ports: ["8000:8000"]
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/symmy_task
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on: [db, redis]
+  worker:
+    build: .
+    command: celery -A core worker --loglevel=info
+    volumes: ['.:/app']
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/symmy_task
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on: [db, redis]
