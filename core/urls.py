@@ -17,6 +17,10 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 
+from integrator.views import mock_product_endpoint
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('v1/products/', mock_product_endpoint, name='mock-product-create'),
+    path('v1/products/<str:sku>/', mock_product_endpoint, name='mock-product-update'),
 ]
