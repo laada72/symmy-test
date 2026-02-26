@@ -1,0 +1,2 @@
+# symmy-test
+Přijímací podušeníčko.
