@@ -114,21 +114,52 @@ class HashDeltaStrategy:
 
 
 class SyncStateManager:
-    """Manages per-SKU sync state in Redis."""
+    """Správce synchronizačního stavu produktů v Redis s fallbackem do PostgreSQL.
+
+    Uchovává pro každé SKU hash obsahu, časové razítko poslední synchronizace
+    a příznak synchronizace. Primárním úložištěm je Redis (rychlý přístup),
+    sekundárním PostgreSQL (perzistence přes ``SyncRecord`` model).
+
+    Attributes:
+        REDIS_KEY_PREFIX: Prefix pro Redis klíče (``product_sync``).
+        redis: Instance Redis klienta.
+        strategy: Instance HashDeltaStrategy pro výpočet hashů.
+    """
 
     REDIS_KEY_PREFIX = "product_sync"
 
     def __init__(self, redis_client):
+        """Inicializuje správce s Redis klientem.
+
+        Args:
+            redis_client: Instance Redis klienta (``redis.Redis``).
+        """
         self.redis = redis_client
         self.strategy = HashDeltaStrategy()
 
     def _key(self, sku: str) -> str:
+        """Sestaví Redis klíč pro dané SKU.
+
+        Args:
+            sku: Identifikátor produktu.
+
+        Returns:
+            Redis klíč ve formátu ``product_sync:{sku}``.
+        """
         return f"{self.REDIS_KEY_PREFIX}:{sku}"
 
     def filter_changed(self, products: list[dict]) -> tuple[list[dict], int]:
-        """
-        Compare product hashes with stored state.
-        Returns (changed_products, skipped_count).
+        """Porovná hashe produktů s uloženým stavem a vrátí pouze změněné.
+
+        Pro každý produkt vypočítá hash a porovná ho s hodnotou uloženou
+        v Redis. Produkty se shodným hashem jsou přeskočeny.
+
+        Args:
+            products: Seznam transformovaných produktů (musí obsahovat klíč ``sku``).
+
+        Returns:
+            Tuple ``(changed_products, skipped_count)`` — seznam změněných
+            produktů a počet přeskočených (nezměněných).
         """
         changed: list[dict] = []
         skipped = 0
@@ -151,7 +182,15 @@ class SyncStateManager:
         return changed, skipped
 
     def mark_synced(self, sku: str, content_hash: str) -> None:
-        """Update Redis and PostgreSQL with new hash and timestamp for SKU."""
+        """Zaznamená úspěšnou synchronizaci produktu do Redis a PostgreSQL.
+
+        Primárně zapíše do Redis (výjimka se propaguje). Sekundárně
+        zapíše do PostgreSQL přes ``SyncRecord`` model (chyba se pouze zaloguje).
+
+        Args:
+            sku: Identifikátor produktu.
+            content_hash: SHA-256 hash aktuálního obsahu produktu.
+        """
         # Redis write (primary) — exception propagates
         self.redis.hset(
             self._key(sku),
@@ -181,10 +220,16 @@ class SyncStateManager:
             )
 
     def was_previously_synced(self, sku: str) -> bool:
-        """Check if SKU has been synced before (POST vs PATCH).
+        """Zjistí, zda byl produkt dříve synchronizován (pro rozhodnutí POST vs PATCH).
 
-        Checks Redis first, falls back to PostgreSQL SyncRecord.
-        If found in DB, restores state in Redis for future fast access.
+        Nejprve kontroluje Redis, při absenci záznamu se dotáže PostgreSQL.
+        Pokud je záznam nalezen v DB, obnoví stav v Redis pro budoucí rychlý přístup.
+
+        Args:
+            sku: Identifikátor produktu.
+
+        Returns:
+            ``True`` pokud byl produkt dříve úspěšně synchronizován.
         """
         val = self.redis.hget(self._key(sku), "synced")
         if val is not None:
@@ -215,9 +260,26 @@ def orchestrate_sync(
     manager: SyncStateManager,
     api_client,  # EshopAPIClient - avoid circular import
 ) -> dict:
-    """Orchestrate delta sync: filter changed products, send to API, update state.
+    """Orchestruje delta synchronizaci produktů do e-shopu.
 
-    Returns summary dict with keys: processed, unchanged, synced, errors, failed_products
+    Filtruje změněné produkty, odesílá je do API (POST/PATCH podle
+    předchozího stavu synchronizace) a aktualizuje sync stav.
+
+    Args:
+        products: Seznam transformovaných produktů.
+        manager: Instance SyncStateManager pro správu stavu.
+        api_client: Instance EshopAPIClient pro komunikaci s API.
+
+    Returns:
+        Slovník se souhrnem synchronizace::
+
+            {
+                "processed": int,        # celkový počet vstupních produktů
+                "unchanged": int,         # počet přeskočených (nezměněných)
+                "synced": int,            # počet úspěšně synchronizovaných
+                "errors": int,            # počet chyb
+                "failed_products": list,  # seznam {"sku": str, "error": str}
+            }
     """
     changed, unchanged_count = manager.filter_changed(products)
 
