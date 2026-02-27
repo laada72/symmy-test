@@ -2,8 +2,6 @@
 
 import json
 import logging
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import fakeredis
@@ -15,6 +13,7 @@ BASE_URL = "https://api.fake-eshop.cz/v1/products/"
 
 
 # -- Test: Task registration and autodiscover --
+
 
 def test_tasks_registered_in_celery():
     """Celery autodiscover must find all integrator tasks."""
@@ -31,16 +30,16 @@ def test_tasks_registered_in_celery():
 
 # -- Test: Pipeline order (chain) --
 
+
 def test_run_sync_pipeline_creates_chain():
     """run_sync_pipeline must create a chain in correct order:
     load_and_validate → transform → delta_sync."""
     with patch("integrator.tasks.chain") as mock_chain:
         mock_chain.return_value.apply_async.return_value = MagicMock()
-        run_sync_pipeline("/tmp/test.json")
+        run_sync_pipeline('[{"id": "SKU-001"}]')
 
         mock_chain.assert_called_once()
         args = mock_chain.call_args[0]
-        # chain() receives a single pipeline expression; inspect task names
         task_names = [sig.task for sig in args]
         assert task_names == [
             "integrator.tasks.load_and_validate",
@@ -50,6 +49,7 @@ def test_run_sync_pipeline_creates_chain():
 
 
 # -- Test: Summary logging after completion --
+
 
 @responses.activate
 def test_delta_sync_logs_summary(caplog):
@@ -89,56 +89,65 @@ def test_delta_sync_logs_summary(caplog):
 
 # -- Test: Traceback logging on unhandled exception --
 
+
 def test_load_and_validate_logs_traceback_on_missing_file(caplog):
-    """When erp_data.json is missing, load_and_validate must log
+    """When raw JSON references missing data, load_and_validate must log
     the full traceback and re-raise the exception."""
     import pytest
 
     with caplog.at_level(logging.ERROR, logger="integrator.tasks"):
-        with pytest.raises(FileNotFoundError):
-            load_and_validate("/nonexistent/path/erp_data.json")
+        with pytest.raises((json.JSONDecodeError, KeyError, TypeError)):
+            load_and_validate("not valid json at all")
 
     assert "Failed to load ERP data" in caplog.text
-    assert "FileNotFoundError" in caplog.text
 
 
 def test_load_and_validate_logs_traceback_on_invalid_json(caplog):
     """When JSON is invalid, load_and_validate must log traceback and fail."""
     import pytest
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        f.write("{invalid json")
-        tmp_path = f.name
-
     with caplog.at_level(logging.ERROR, logger="integrator.tasks"):
         with pytest.raises(Exception):
-            load_and_validate(tmp_path)
+            load_and_validate("{invalid json")
 
     assert "Failed to load ERP data" in caplog.text
-    Path(tmp_path).unlink(missing_ok=True)
 
 
 # -- Test: load_and_validate returns correct data --
 
+
 def test_load_and_validate_returns_products():
-    """load_and_validate must return parsed products from JSON file."""
-    data = [{"id": "SKU-001", "title": "A", "price_vat_excl": 10.0, "stocks": {}, "attributes": None}]
+    """load_and_validate must return parsed products from raw JSON string."""
+    data = [
+        {
+            "id": "SKU-001",
+            "title": "A",
+            "price_vat_excl": 10.0,
+            "stocks": {},
+            "attributes": None,
+        }
+    ]
+    raw_json = json.dumps(data)
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(data, f)
-        tmp_path = f.name
-
-    result = load_and_validate(tmp_path)
+    result = load_and_validate(raw_json)
     assert len(result) == 1
     assert result[0]["id"] == "SKU-001"
-    Path(tmp_path).unlink(missing_ok=True)
 
 
 # -- Test: transform task delegates correctly --
 
+
 def test_transform_applies_business_rules():
     """transform task must apply VAT calculation and return transformed products."""
-    raw = [{"id": "SKU-T", "title": "T", "price_vat_excl": 100.0, "stocks": {"wh1": 5}, "attributes": {"color": "blue"}}]
+    raw = [
+        {
+            "id": "SKU-T",
+            "title": "T",
+            "price_vat_excl": 100.0,
+            "stocks": {"wh1": 5},
+            "attributes": {"color": "blue"},
+        }
+    ]
     result = transform(raw)
     assert len(result) == 1
     assert result[0]["price_vat_incl"] == 121.0
