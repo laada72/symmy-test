@@ -1,18 +1,16 @@
 """Celery tasks for the ERP ↔ E-shop sync pipeline."""
 
+import json
 import logging
 import traceback
-from pathlib import Path
 
 import redis
 from celery import chain, shared_task
 from django.conf import settings
 
 from integrator.clients import EshopAPIClient
-from integrator.protocols import ERPDataLoader
 from integrator.services import (
     HashDeltaStrategy,
-    JSONFileLoader,
     SyncStateManager,
     transform_products,
 )
@@ -21,16 +19,25 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task
-def load_and_validate(json_path: str | None = None) -> list[dict]:
-    """Load ERP data via JSONFileLoader, merge duplicates, return raw products."""
-    path = Path(json_path) if json_path else Path(settings.BASE_DIR) / "erp_data.json"
+def load_and_validate(raw_json: str) -> list[dict]:
+    """Parse raw JSON string, merge duplicates, return raw products."""
     try:
-        loader: ERPDataLoader = JSONFileLoader(path=path)
-        products = loader.load()
-        logger.info("[load_and_validate] Loaded %d raw products from %s", len(products), path)
+        data: list[dict] = json.loads(raw_json)
+
+        # Merge duplicates — last occurrence wins
+        seen: dict[str, dict] = {}
+        for product in data:
+            seen[product["id"]] = product
+
+        products = list(seen.values())
+        logger.info("[load_and_validate] Loaded %d raw products", len(products))
         return products
-    except (FileNotFoundError, ValueError) as exc:
-        logger.error("[load_and_validate] Failed to load ERP data: %s\n%s", exc, traceback.format_exc())
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        logger.error(
+            "[load_and_validate] Failed to load ERP data: %s\n%s",
+            exc,
+            traceback.format_exc(),
+        )
         raise
 
 
@@ -38,7 +45,9 @@ def load_and_validate(json_path: str | None = None) -> list[dict]:
 def transform(raw_products: list[dict]) -> list[dict]:
     """Apply business rules, return transformed products."""
     result = transform_products(raw_products)
-    logger.info("[transform] %d products in, %d products out", len(raw_products), len(result))
+    logger.info(
+        "[transform] %d products in, %d products out", len(raw_products), len(result)
+    )
     return result
 
 
@@ -84,10 +93,10 @@ def delta_sync(transformed_products: list[dict]) -> dict:
     return summary
 
 
-def run_sync_pipeline(json_path: str | None = None):
+def run_sync_pipeline(raw_json: str):
     """Orchestrate full pipeline as Celery chain."""
     return chain(
-        load_and_validate.s(json_path),
+        load_and_validate.s(raw_json),
         transform.s(),
         delta_sync.s(),
     ).apply_async()

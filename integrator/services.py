@@ -4,35 +4,10 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 
 from integrator.protocols import DeltaStrategy
 
 logger = logging.getLogger(__name__)
-
-
-class JSONFileLoader:
-    """Loads ERP data from a local JSON file."""
-
-    def __init__(self, path: Path):
-        self.path = path
-
-    def load(self) -> list[dict]:
-        """
-        Read and parse JSON file.
-
-        Raises FileNotFoundError or json.JSONDecodeError on failure.
-        Merges duplicate SKUs (last occurrence wins).
-        """
-        with open(self.path, encoding="utf-8") as f:
-            raw: list[dict] = json.load(f)
-
-        # Merge duplicates — last occurrence wins
-        seen: dict[str, dict] = {}
-        for product in raw:
-            seen[product["id"]] = product
-
-        return list(seen.values())
 
 
 def transform_products(raw_products: list[dict]) -> list[dict]:
@@ -51,7 +26,11 @@ def transform_products(raw_products: list[dict]) -> list[dict]:
         price = product.get("price_vat_excl")
 
         if price is None or price < 0:
-            logger.warning("[transform_products] Skipping product %s: invalid price %s", product.get("id"), price)
+            logger.warning(
+                "[transform_products] Skipping product %s: invalid price %s",
+                product.get("id"),
+                price,
+            )
             continue
 
         # Stock aggregation
@@ -62,14 +41,16 @@ def transform_products(raw_products: list[dict]) -> list[dict]:
         attributes = product.get("attributes") or {}
         color = attributes.get("color") or "N/A"
 
-        result.append({
-            "sku": product["id"],
-            "title": product["title"],
-            "price_vat_excl": price,
-            "price_vat_incl": round(price * 1.21, 2),
-            "stock_quantity": stock_quantity,
-            "color": color,
-        })
+        result.append(
+            {
+                "sku": product["id"],
+                "title": product["title"],
+                "price_vat_excl": price,
+                "price_vat_incl": round(price * 1.21, 2),
+                "stock_quantity": stock_quantity,
+                "color": color,
+            }
+        )
 
     return result
 
@@ -122,11 +103,14 @@ class SyncStateManager:
 
     def mark_synced(self, sku: str, content_hash: str) -> None:
         """Update Redis with new hash and timestamp for SKU."""
-        self.redis.hset(self._key(sku), mapping={
-            "content_hash": content_hash,
-            "last_synced": datetime.now(timezone.utc).isoformat(),
-            "synced": "1",
-        })
+        self.redis.hset(
+            self._key(sku),
+            mapping={
+                "content_hash": content_hash,
+                "last_synced": datetime.now(timezone.utc).isoformat(),
+                "synced": "1",
+            },
+        )
 
     def was_previously_synced(self, sku: str) -> bool:
         """Check if SKU has been synced before (POST vs PATCH)."""
