@@ -1,44 +1,81 @@
 """E-shop API client with rate limiting and retry logic."""
 
+from __future__ import annotations
+
 import logging
 import time
 
 import requests
 from django.conf import settings
 
+from integrator.services import TokenBucketRateLimiter
+
 logger = logging.getLogger(__name__)
 
 
 class EshopAPIClient:
-    """HTTP client for e-shop REST API with rate limiting and retry."""
+    """HTTP klient pro e-shop REST API s rate limitingem a retry logikou.
+
+    Odesílá produktová data do e-shopu pomocí POST (nový produkt)
+    nebo PATCH (aktualizace existujícího). Automaticky dodržuje
+    maximální počet požadavků za sekundu a při HTTP 429 provede
+    jeden opakovaný pokus po uplynutí doby z hlavičky Retry-After.
+
+    Attributes:
+        base_url: Základní URL e-shop API.
+        api_key: API klíč pro autentizaci.
+        rate_limiter: Instance TokenBucketRateLimiter pro řízení rychlosti.
+    """
 
     def __init__(
         self,
         base_url: str | None = None,
         api_key: str | None = None,
         max_rps: int = 5,
+        rate_limiter: TokenBucketRateLimiter | None = None,
     ):
+        """Inicializuje klienta s konfigurací API a rate limiterem.
+
+        Args:
+            base_url: Základní URL e-shop API. Pokud není zadáno,
+                použije se hodnota z ``settings.ESHOP_API_BASE_URL``.
+            api_key: API klíč. Pokud není zadán,
+                použije se hodnota z ``settings.ESHOP_API_KEY``.
+            max_rps: Maximální počet požadavků za sekundu (výchozí 5).
+            rate_limiter: Vlastní instance rate limiteru. Pokud není zadána,
+                vytvoří se nová s ``max_rps``.
+        """
         self.base_url = base_url or settings.ESHOP_API_BASE_URL
         self.api_key = api_key or settings.ESHOP_API_KEY
-        self.max_rps = max_rps
-        self._min_interval = 1.0 / max_rps
-        self._last_request_time: float = 0.0
+        self.rate_limiter = rate_limiter or TokenBucketRateLimiter(max_rps=max_rps)
 
     def _wait_for_rate_limit(self) -> None:
-        """Sleep if needed to respect max requests per second."""
-        now = time.monotonic()
-        elapsed = now - self._last_request_time
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_request_time = time.monotonic()
+        """Počká potřebnou dobu pro dodržení maximálního počtu požadavků za sekundu.
+
+        Dotáže se rate limiteru na potřebnou čekací dobu a pokud je nenulová,
+        uspí vlákno. Po probuzení zaznamená provedení požadavku.
+        """
+        wait_time = self.rate_limiter.acquire()
+        if wait_time > 0:
+            time.sleep(wait_time)
+        self.rate_limiter.record_request()
 
     def send_product(
         self, product: dict, is_update: bool
     ) -> tuple[dict | None, str | None]:
-        """
-        POST (new) or PATCH (existing) product to e-shop API.
+        """Odešle produkt do e-shop API jako POST (nový) nebo PATCH (aktualizace).
 
-        Returns (response_data, error_message).
+        Při HTTP 429 (rate limit) provede jeden opakovaný pokus po uplynutí
+        doby uvedené v hlavičce ``Retry-After``.
+
+        Args:
+            product: Slovník s daty produktu. Musí obsahovat klíče
+                ``sku``, ``title``, ``price_vat_incl``, ``stock_quantity``, ``color``.
+            is_update: ``True`` pro PATCH (aktualizace), ``False`` pro POST (nový).
+
+        Returns:
+            Tuple ``(response_data, None)`` při úspěchu,
+            nebo ``(None, error_message)`` při chybě.
         """
         sku = product["sku"]
         payload = {
@@ -60,7 +97,9 @@ class EshopAPIClient:
         self._wait_for_rate_limit()
 
         try:
-            resp = requests.request(method, url, json=payload, headers=headers, timeout=1)
+            resp = requests.request(
+                method, url, json=payload, headers=headers, timeout=1
+            )
         except requests.RequestException as exc:
             error = f"[EshopAPIClient.send_product] Request failed for SKU {sku}: {exc}"
             logger.error(error)
@@ -69,11 +108,17 @@ class EshopAPIClient:
         # Retry on 429
         if resp.status_code == 429:
             retry_after = float(resp.headers.get("Retry-After", 1))
-            logger.warning("[EshopAPIClient.send_product] Rate limited for SKU %s, retrying after %.1fs", sku, retry_after)
+            logger.warning(
+                "[EshopAPIClient.send_product] Rate limited for SKU %s, retrying after %.1fs",
+                sku,
+                retry_after,
+            )
             time.sleep(retry_after)
-            self._last_request_time = time.monotonic()
+            self.rate_limiter.record_request()
             try:
-                resp = requests.request(method, url, json=payload, headers=headers, timeout=1)
+                resp = requests.request(
+                    method, url, json=payload, headers=headers, timeout=1
+                )
             except requests.RequestException as exc:
                 error = f"[EshopAPIClient.send_product] Retry request failed for SKU {sku}: {exc}"
                 logger.error(error)

@@ -84,7 +84,7 @@ def test_delta_sync_logs_summary(caplog):
     assert result["synced"] == 1
     assert result["unchanged"] == 0
     assert "Sync complete" in caplog.text
-    assert "synced=1" in caplog.text
+    assert "'synced': 1" in caplog.text
 
 
 # -- Test: Traceback logging on unhandled exception --
@@ -153,3 +153,214 @@ def test_transform_applies_business_rules():
     assert result[0]["price_vat_incl"] == 121.0
     assert result[0]["stock_quantity"] == 5
     assert result[0]["color"] == "blue"
+
+
+# -- Tests for refactored delta_sync (Task 5.6) --
+
+
+def test_delta_sync_default_factory(caplog):
+    """When no factory provided, delta_sync creates dependencies from Django settings."""
+    fake_redis = fakeredis.FakeRedis()
+    products = [
+        {
+            "sku": "SKU-DF",
+            "title": "Default Factory",
+            "price_vat_excl": 50.0,
+            "price_vat_incl": 60.5,
+            "stock_quantity": 5,
+            "color": "green",
+        },
+    ]
+
+    with (
+        patch(
+            "integrator.tasks.redis.Redis.from_url", return_value=fake_redis
+        ) as mock_redis,
+        patch("integrator.tasks.EshopAPIClient") as mock_client_cls,
+        patch("integrator.tasks.orchestrate_sync") as mock_orch,
+    ):
+        mock_orch.return_value = {
+            "processed": 1,
+            "unchanged": 0,
+            "synced": 1,
+            "errors": 0,
+            "failed_products": [],
+        }
+        delta_sync(products)
+
+        # Default factory should create Redis client from settings
+        mock_redis.assert_called_once()
+        # Default factory should create EshopAPIClient
+        mock_client_cls.assert_called_once()
+        # orchestrate_sync should be called with the created dependencies
+        mock_orch.assert_called_once()
+
+
+def test_delta_sync_provided_factory():
+    """When factory is provided, delta_sync uses it instead of default."""
+    mock_manager = MagicMock()
+    mock_api = MagicMock()
+    factory = MagicMock(return_value=(mock_manager, mock_api))
+
+    products = [
+        {
+            "sku": "SKU-PF",
+            "title": "Provided Factory",
+            "price_vat_excl": 50.0,
+            "price_vat_incl": 60.5,
+            "stock_quantity": 5,
+            "color": "blue",
+        },
+    ]
+
+    with (
+        patch("integrator.tasks.redis.Redis.from_url") as mock_redis,
+        patch("integrator.tasks.EshopAPIClient") as mock_client_cls,
+        patch("integrator.tasks.orchestrate_sync") as mock_orch,
+    ):
+        mock_orch.return_value = {
+            "processed": 1,
+            "unchanged": 0,
+            "synced": 1,
+            "errors": 0,
+            "failed_products": [],
+        }
+        delta_sync(products, dependency_factory=factory)
+
+        # Factory should be called
+        factory.assert_called_once()
+        # Default creation should NOT be called
+        mock_redis.assert_not_called()
+        mock_client_cls.assert_not_called()
+        # orchestrate_sync should receive factory-created deps
+        mock_orch.assert_called_once_with(products, mock_manager, mock_api)
+
+
+def test_delta_sync_logs_summary_info(caplog):
+    """delta_sync must log summary at INFO level after completion."""
+    mock_manager = MagicMock()
+    mock_api = MagicMock()
+    factory = MagicMock(return_value=(mock_manager, mock_api))
+
+    with (
+        patch("integrator.tasks.orchestrate_sync") as mock_orch,
+        caplog.at_level(logging.INFO, logger="integrator.tasks"),
+    ):
+        mock_orch.return_value = {
+            "processed": 2,
+            "unchanged": 1,
+            "synced": 1,
+            "errors": 0,
+            "failed_products": [],
+        }
+        delta_sync([], dependency_factory=factory)
+
+    assert "Sync complete" in caplog.text
+    assert "'processed': 2" in caplog.text
+
+
+def test_delta_sync_celery_chain_compatibility():
+    """delta_sync must work in a Celery chain (accepts list as first arg)."""
+    with patch("integrator.tasks.chain") as mock_chain:
+        mock_chain.return_value.apply_async.return_value = MagicMock()
+        run_sync_pipeline('[{"id": "SKU-CC"}]')
+
+        args = mock_chain.call_args[0]
+        task_names = [sig.task for sig in args]
+        assert "integrator.tasks.delta_sync" in task_names
+
+
+# -- Property 6: Filtrování nevalidních záznamů v load_and_validate --
+# Feature: integrator-refactoring, Property 6: Filtrování nevalidních záznamů v load_and_validate
+
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+# Strategy for records with 'id' field
+valid_record_strategy = st.fixed_dictionaries(
+    {
+        "id": st.text(
+            alphabet=st.characters(
+                whitelist_categories=("L", "N"), whitelist_characters="-_"
+            ),
+            min_size=1,
+            max_size=20,
+        ),
+        "title": st.text(min_size=1, max_size=50),
+        "price_vat_excl": st.floats(
+            min_value=0, max_value=10000, allow_nan=False, allow_infinity=False
+        ),
+    }
+)
+
+# Strategy for records WITHOUT 'id' field
+invalid_record_strategy = st.fixed_dictionaries(
+    {
+        "title": st.text(min_size=1, max_size=50),
+        "price_vat_excl": st.floats(
+            min_value=0, max_value=10000, allow_nan=False, allow_infinity=False
+        ),
+    }
+)
+
+mixed_record_strategy = st.one_of(valid_record_strategy, invalid_record_strategy)
+
+
+@given(records=st.lists(mixed_record_strategy, min_size=0, max_size=20))
+@settings(max_examples=100)
+def test_property_filter_invalid_records(records: list[dict]) -> None:
+    """Returned records subset of input, all have 'id', count <= input.
+
+    **Validates: Requirements 6.1, 6.3**
+    """
+    raw_json = json.dumps(records)
+    result = load_and_validate(raw_json)
+
+    # All returned records must have 'id'
+    for r in result:
+        assert "id" in r
+
+    # Count must be <= input
+    assert len(result) <= len(records)
+
+    # Returned records must be a subset of input valid records
+    input_valid = [r for r in records if "id" in r]
+    result_ids = {r["id"] for r in result}
+    input_valid_ids = {r["id"] for r in input_valid}
+    assert result_ids <= input_valid_ids
+
+
+# -- Tests for load_and_validate edge cases (Task 5.9) --
+
+
+def test_load_and_validate_logs_skipped_count(caplog):
+    """Summary log must contain count of skipped invalid records."""
+    data = [
+        {"id": "SKU-OK", "title": "Valid"},
+        {"title": "No ID 1"},
+        {"title": "No ID 2"},
+    ]
+    raw_json = json.dumps(data)
+
+    with caplog.at_level(logging.WARNING, logger="integrator.tasks"):
+        result = load_and_validate(raw_json)
+
+    assert len(result) == 1
+    assert result[0]["id"] == "SKU-OK"
+    assert "Skipped 2 invalid records" in caplog.text
+
+
+def test_load_and_validate_all_invalid_returns_empty(caplog):
+    """When all records are invalid, return empty list and log warning."""
+    data = [
+        {"title": "No ID 1"},
+        {"title": "No ID 2"},
+        {"price": 100},
+    ]
+    raw_json = json.dumps(data)
+
+    with caplog.at_level(logging.WARNING, logger="integrator.tasks"):
+        result = load_and_validate(raw_json)
+
+    assert result == []
+    assert "Skipped 3 invalid records" in caplog.text
