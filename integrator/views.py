@@ -12,7 +12,21 @@ from django.views.decorators.http import require_http_methods
 @csrf_exempt
 @require_http_methods(["POST", "PATCH"])
 def mock_product_endpoint(request, sku=None):
-    """Accept POST/PATCH with random failures: 429 (15%), 500 (10%), timeout (5%)."""
+    """Mock endpoint e-shop API pro integrační testování s náhodnými chybami.
+
+    Simuluje reálné chování e-shop API včetně náhodných selhání:
+    - 5 % šance: simulovaný timeout (sleep 2s)
+    - 15 % šance: HTTP 429 Too Many Requests s hlavičkou Retry-After
+    - 10 % šance: HTTP 500 Internal Server Error
+    - 70 % šance: úspěch (201 pro POST, 200 pro PATCH)
+
+    Args:
+        request: Django HTTP request objekt s JSON tělem produktu.
+        sku: Volitelný identifikátor produktu (pro PATCH požadavky).
+
+    Returns:
+        ``JsonResponse`` s odpovídajícím HTTP status kódem.
+    """
     roll = random.random()
 
     # 5% chance: simulate timeout (sleep 15s, client has 10s timeout)

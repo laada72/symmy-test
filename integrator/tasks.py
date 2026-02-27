@@ -23,7 +23,21 @@ logger = logging.getLogger(__name__)
 
 @shared_task
 def load_and_validate(raw_json: str) -> list[dict]:
-    """Parse raw JSON string, skip invalid records, merge duplicates, return raw products."""
+    """Načte a zvaliduje surová JSON data z ERP systému.
+
+    Parsuje JSON řetězec, přeskočí záznamy bez klíče ``id`` (s logováním),
+    a sloučí duplicity — při duplicitním ``id`` vyhrává poslední výskyt.
+
+    Args:
+        raw_json: Surový JSON řetězec obsahující pole produktových objektů.
+
+    Returns:
+        Seznam validních produktových slovníků s unikátními ``id``.
+
+    Raises:
+        json.JSONDecodeError: Pokud vstup není validní JSON.
+        TypeError: Pokud vstup není správného typu.
+    """
     try:
         data: list[dict] = json.loads(raw_json)
 
@@ -66,7 +80,17 @@ def load_and_validate(raw_json: str) -> list[dict]:
 
 @shared_task
 def transform(raw_products: list[dict]) -> list[dict]:
-    """Apply business rules, return transformed products."""
+    """Aplikuje business pravidla na surové produkty z ERP.
+
+    Deleguje na ``transform_products`` — vypočítá cenu s DPH,
+    agreguje skladové zásoby a extrahuje barvu z atributů.
+
+    Args:
+        raw_products: Seznam surových produktových slovníků z ERP.
+
+    Returns:
+        Seznam transformovaných produktů připravených k synchronizaci.
+    """
     result = transform_products(raw_products)
     logger.info(
         "[transform] %d products in, %d products out", len(raw_products), len(result)
@@ -79,7 +103,21 @@ def delta_sync(
     transformed_products: list[dict],
     dependency_factory: DependencyFactory | None = None,
 ) -> dict:
-    """Thin wrapper: create dependencies and delegate to orchestrate_sync."""
+    """Provede delta synchronizaci transformovaných produktů do e-shopu.
+
+    Vytvoří potřebné závislosti (Redis klient, SyncStateManager, EshopAPIClient)
+    a deleguje na ``orchestrate_sync``. Závislosti lze injektovat přes
+    ``dependency_factory`` pro testování.
+
+    Args:
+        transformed_products: Seznam transformovaných produktů z předchozího kroku.
+        dependency_factory: Volitelná tovární funkce vracející tuple
+            ``(SyncStateManager, EshopAPIClient)``. Pokud není zadána,
+            vytvoří se výchozí instance z nastavení aplikace.
+
+    Returns:
+        Slovník se souhrnem synchronizace (viz ``orchestrate_sync``).
+    """
     if dependency_factory is None:
         redis_client = redis.Redis.from_url(settings.CELERY_BROKER_URL)
         manager = SyncStateManager(redis_client)
@@ -93,7 +131,19 @@ def delta_sync(
 
 
 def run_sync_pipeline(raw_json: str):
-    """Orchestrate full pipeline as Celery chain."""
+    """Spustí kompletní synchronizační pipeline jako Celery chain.
+
+    Pipeline se skládá ze tří kroků:
+    1. ``load_and_validate`` — parsování a validace JSON dat
+    2. ``transform`` — aplikace business pravidel
+    3. ``delta_sync`` — delta synchronizace do e-shopu
+
+    Args:
+        raw_json: Surový JSON řetězec s produktovými daty z ERP.
+
+    Returns:
+        ``celery.result.AsyncResult`` s ID spuštěného tasku.
+    """
     return chain(
         load_and_validate.s(raw_json),
         transform.s(),
