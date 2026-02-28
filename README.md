@@ -97,7 +97,7 @@ docker-compose exec web pytest
 - pytest + hypothesis + responses (testy)
 
 
-## Možná vylepšení
+## Možná vylepšení / diskuze
 
 1. **Lepší retry logika (tenacity/urllib3/task)** — Současná retry logika při HTTP 429 čeká fixní dobu z `Retry-After` hlavičky (s fallbak na default 1s). Exponenciální backoff s knihovnou tenacity, urllib3 nebo separatni (make request) task s Retry zajistí robustnější chování při opakovaných selháních a sníží zátěž na API. Tento bod ma ovšem komplexní logiku, která závisí na znalosti chování a požadavků obou integrovaných apps.
 
