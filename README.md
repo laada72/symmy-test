@@ -1,6 +1,7 @@
 # Symmy Tasker: ERP → E-shop Integrace
 
 Synchronizační můstek mezi ERP systémem a e-shopem postavený na Django, Celery, Redis a PostgreSQL.
+(Ultimátní řešení je samozřejmě 42, ale předpokladám, že s tím se bohužel nespokojíte)
 
 ## Architektura
 
