@@ -11,6 +11,7 @@ from integrator.services import (
     HashDeltaStrategy,
     SyncStateManager,
     TokenBucketRateLimiter,
+    orchestrate_sync,
     transform_products,
 )
 from integrator.tasks import load_and_validate
@@ -480,8 +481,6 @@ def test_property_postgresql_fallback_with_redis_restoration(
 
 # -- Property 1: Invariant souhrnného slovníku orchestrátoru --
 # Feature: integrator-refactoring, Property 1: Invariant souhrnného slovníku orchestrátoru
-
-from integrator.services import orchestrate_sync
 
 
 @given(products=st.lists(transformed_product_strategy, min_size=0, max_size=20))

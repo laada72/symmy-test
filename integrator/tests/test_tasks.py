@@ -7,6 +7,9 @@ from unittest.mock import MagicMock, patch
 import fakeredis
 import pytest
 import responses
+from hypothesis import given
+from hypothesis import settings as hypothesis_settings
+from hypothesis import strategies as st
 
 from integrator.tasks import delta_sync, load_and_validate, run_sync_pipeline, transform
 
@@ -233,9 +236,6 @@ def test_delta_sync_provided_factory():
 # -- Property 6: Filtrování nevalidních záznamů v load_and_validate --
 # Feature: integrator-refactoring, Property 6: Filtrování nevalidních záznamů v load_and_validate
 
-from hypothesis import given, settings
-from hypothesis import strategies as st
-
 # Strategy for records with 'id' field
 valid_record_strategy = st.fixed_dictionaries(
     {
@@ -267,7 +267,7 @@ mixed_record_strategy = st.one_of(valid_record_strategy, invalid_record_strategy
 
 
 @given(records=st.lists(mixed_record_strategy, min_size=0, max_size=20))
-@settings(max_examples=100)
+@hypothesis_settings(max_examples=100)
 def test_property_filter_invalid_records(records: list[dict]) -> None:
     """Returned records subset of input, all have 'id', count <= input.
 
