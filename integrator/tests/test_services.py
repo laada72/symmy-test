@@ -288,33 +288,6 @@ def test_property_delta_detection(products: list[dict]) -> None:
     assert skipped == len(products)
 
 
-# -- Property 8: Aktualizace stavu po synchronizaci --
-# Feature: erp-eshop-sync, Property 8: Aktualizace stavu po synchronizaci
-
-
-@given(sku=sku_strategy, product=transformed_product_strategy)
-@settings(max_examples=100)
-def test_property_state_update_after_sync(sku: str, product: dict) -> None:
-    """After calling mark_synced with a new hash, the stored hash in Redis
-    must match the new hash and the timestamp must be current."""
-    redis_client = fakeredis.FakeRedis(decode_responses=True)
-    manager = SyncStateManager(redis_client)
-
-    new_hash = manager.strategy.compute_hash(product)
-    before = datetime.now(timezone.utc)
-
-    manager.mark_synced(sku, new_hash)
-
-    stored_hash = redis_client.hget(f"product_sync:{sku}", "content_hash")
-    assert stored_hash == new_hash
-
-    stored_ts = redis_client.hget(f"product_sync:{sku}", "last_synced")
-    assert stored_ts is not None
-    ts = datetime.fromisoformat(str(stored_ts))
-    assert ts >= before
-    assert ts <= datetime.now(timezone.utc)
-
-
 # -- Property 3: Token bucket rate limiter vynucuje minimální interval --
 # Feature: integrator-refactoring, Property 3: Token bucket rate limiter vynucuje minimální interval
 

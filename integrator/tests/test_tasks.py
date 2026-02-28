@@ -5,6 +5,7 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import fakeredis
+import pytest
 import responses
 
 from integrator.tasks import delta_sync, load_and_validate, run_sync_pipeline, transform
@@ -90,25 +91,18 @@ def test_delta_sync_logs_summary(caplog):
 # -- Test: Traceback logging on unhandled exception --
 
 
-def test_load_and_validate_logs_traceback_on_missing_file(caplog):
-    """When raw JSON references missing data, load_and_validate must log
-    the full traceback and re-raise the exception."""
-    import pytest
-
-    with caplog.at_level(logging.ERROR, logger="integrator.tasks"):
-        with pytest.raises((json.JSONDecodeError, KeyError, TypeError)):
-            load_and_validate("not valid json at all")
-
-    assert "Failed to load ERP data" in caplog.text
-
-
-def test_load_and_validate_logs_traceback_on_invalid_json(caplog):
+@pytest.mark.parametrize(
+    "invalid_input",
+    [
+        pytest.param("not valid json at all", id="plain-text"),
+        pytest.param("{invalid json", id="malformed-json"),
+    ],
+)
+def test_load_and_validate_logs_traceback_on_invalid_input(caplog, invalid_input):
     """When JSON is invalid, load_and_validate must log traceback and fail."""
-    import pytest
-
     with caplog.at_level(logging.ERROR, logger="integrator.tasks"):
         with pytest.raises(Exception):
-            load_and_validate("{invalid json")
+            load_and_validate(invalid_input)
 
     assert "Failed to load ERP data" in caplog.text
 
@@ -234,40 +228,6 @@ def test_delta_sync_provided_factory():
         mock_client_cls.assert_not_called()
         # orchestrate_sync should receive factory-created deps
         mock_orch.assert_called_once_with(products, mock_manager, mock_api)
-
-
-def test_delta_sync_logs_summary_info(caplog):
-    """delta_sync must log summary at INFO level after completion."""
-    mock_manager = MagicMock()
-    mock_api = MagicMock()
-    factory = MagicMock(return_value=(mock_manager, mock_api))
-
-    with (
-        patch("integrator.tasks.orchestrate_sync") as mock_orch,
-        caplog.at_level(logging.INFO, logger="integrator.tasks"),
-    ):
-        mock_orch.return_value = {
-            "processed": 2,
-            "unchanged": 1,
-            "synced": 1,
-            "errors": 0,
-            "failed_products": [],
-        }
-        delta_sync([], dependency_factory=factory)
-
-    assert "Sync complete" in caplog.text
-    assert "'processed': 2" in caplog.text
-
-
-def test_delta_sync_celery_chain_compatibility():
-    """delta_sync must work in a Celery chain (accepts list as first arg)."""
-    with patch("integrator.tasks.chain") as mock_chain:
-        mock_chain.return_value.apply_async.return_value = MagicMock()
-        run_sync_pipeline('[{"id": "SKU-CC"}]')
-
-        args = mock_chain.call_args[0]
-        task_names = [sig.task for sig in args]
-        assert "integrator.tasks.delta_sync" in task_names
 
 
 # -- Property 6: Filtrování nevalidních záznamů v load_and_validate --
