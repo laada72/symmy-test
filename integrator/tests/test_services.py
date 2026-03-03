@@ -607,3 +607,113 @@ def test_property_structured_failure_logging(products: list[dict]) -> None:
     failed_skus = {e["sku"] for e in summary["failed_products"]}
     # changed = processed - unchanged
     assert len(failed_skus) == summary["errors"]
+
+
+# ---------------------------------------------------------------------------
+# DB-backed tests — run against real PostgreSQL when available, skip otherwise
+# ---------------------------------------------------------------------------
+#
+# Pattern: pytest fixture `live_db` tries to get the `db` fixture (which
+# requires a real DB connection). If the DB is unreachable it marks the test
+# as skipped instead of erroring. Tests decorated with `@pytest.mark.usefixtures`
+# or accepting `live_db` as a parameter will be skipped automatically when
+# running outside Docker.
+
+import pytest
+
+
+def _db_available() -> bool:
+    """Check DB reachability via TCP socket — safe at collection time."""
+    import socket
+
+    from django.conf import settings
+
+    db = settings.DATABASES["default"]
+    host = db.get("HOST", "localhost")
+    port = int(db.get("PORT", 5432))
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+# Evaluated once at collection time — cheap enough.
+_DB_AVAILABLE = _db_available()
+
+skip_no_db = pytest.mark.skipif(
+    not _DB_AVAILABLE,
+    reason="PostgreSQL not reachable — run inside Docker to execute DB tests",
+)
+
+
+# -- Property 7 (real DB): Dual-write sync stavu do Redis a PostgreSQL --
+# Feature: integrator-refactoring, Property 7: Dual-write do Redis a PostgreSQL
+
+
+@skip_no_db
+@pytest.mark.django_db
+@given(sku=sku_strategy, product=transformed_product_strategy)
+@settings(max_examples=50)
+def test_property_dual_write_sync_state_db(sku: str, product: dict) -> None:
+    """After adapters.SyncStateManager.mark_synced, hash must be in both Redis and DB.
+
+    Runs only when PostgreSQL is reachable (inside Docker).
+    **Validates: Requirements 8.2**
+    """
+    from integrator.adapters import SyncStateManager as AdaptersSyncStateManager
+    from integrator.models import SyncRecord
+
+    redis_client = fakeredis.FakeRedis(decode_responses=True)
+    manager = AdaptersSyncStateManager(redis_client)
+
+    content_hash = manager.strategy.compute_hash(product)
+    manager.mark_synced(sku, content_hash)
+
+    # Verify Redis
+    assert redis_client.hget(f"product_sync:{sku}", "content_hash") == content_hash
+    assert redis_client.hget(f"product_sync:{sku}", "synced") == "1"
+
+    # Verify PostgreSQL
+    record = SyncRecord.objects.get(sku=sku)
+    assert record.content_hash == content_hash
+    assert record.synced is True
+
+
+# -- Property 8 (real DB): PostgreSQL fallback s obnovou Redis --
+# Feature: integrator-refactoring, Property 8: PostgreSQL fallback s obnovou Redis
+
+
+@skip_no_db
+@pytest.mark.django_db
+@given(sku=sku_strategy, product=transformed_product_strategy)
+@settings(max_examples=50)
+def test_property_postgresql_fallback_with_redis_restoration_db(
+    sku: str, product: dict
+) -> None:
+    """SKU in PostgreSQL but not Redis → was_previously_synced returns True, restores Redis.
+
+    Runs only when PostgreSQL is reachable (inside Docker).
+    **Validates: Requirements 8.3, 8.4, 8.5**
+    """
+    from integrator.adapters import SyncStateManager as AdaptersSyncStateManager
+    from integrator.models import SyncRecord
+
+    redis_client = fakeredis.FakeRedis(decode_responses=True)
+    manager = AdaptersSyncStateManager(redis_client)
+
+    content_hash = manager.strategy.compute_hash(product)
+    now = datetime.now(timezone.utc)
+
+    # Seed PostgreSQL directly — Redis is empty
+    SyncRecord.objects.update_or_create(
+        sku=sku,
+        defaults={"content_hash": content_hash, "last_synced": now, "synced": True},
+    )
+    assert redis_client.hget(f"product_sync:{sku}", "synced") is None
+
+    result = manager.was_previously_synced(sku)
+
+    assert result is True
+    assert redis_client.hget(f"product_sync:{sku}", "content_hash") == content_hash
+    assert redis_client.hget(f"product_sync:{sku}", "synced") == "1"

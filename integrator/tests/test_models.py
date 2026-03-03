@@ -56,3 +56,61 @@ def test_syncrecord_meta() -> None:
     assert SyncRecord._meta.db_table == "integrator_syncrecord"
     assert str(SyncRecord._meta.verbose_name) == "Sync Record"
     assert str(SyncRecord._meta.verbose_name_plural) == "Sync Records"
+
+
+# ---------------------------------------------------------------------------
+# DB-backed tests — skipped when PostgreSQL is not reachable
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+def _db_available() -> bool:
+    """Check DB reachability via TCP socket — safe at collection time."""
+    import socket
+
+    from django.conf import settings
+
+    db = settings.DATABASES["default"]
+    host = db.get("HOST", "localhost")
+    port = int(db.get("PORT", 5432))
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+skip_no_db = pytest.mark.skipif(
+    not _db_available(),
+    reason="PostgreSQL not reachable — run inside Docker to execute DB tests",
+)
+
+
+@skip_no_db
+@pytest.mark.django_db
+def test_syncrecord_create_and_retrieve() -> None:
+    """SyncRecord can be created and retrieved from the real DB."""
+    now = datetime.now(timezone.utc)
+    SyncRecord.objects.create(
+        sku="SKU-DB-001",
+        content_hash="a" * 64,
+        last_synced=now,
+    )
+    record = SyncRecord.objects.get(sku="SKU-DB-001")
+    assert record.content_hash == "a" * 64
+    assert record.synced is False
+
+
+@skip_no_db
+@pytest.mark.django_db
+def test_syncrecord_update_or_create() -> None:
+    """update_or_create upserts correctly."""
+    now = datetime.now(timezone.utc)
+    SyncRecord.objects.update_or_create(
+        sku="SKU-DB-002",
+        defaults={"content_hash": "b" * 64, "last_synced": now, "synced": True},
+    )
+    record = SyncRecord.objects.get(sku="SKU-DB-002")
+    assert record.synced is True
+    assert record.content_hash == "b" * 64
