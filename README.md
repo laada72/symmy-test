@@ -5,55 +5,79 @@ Synchronizační můstek mezi ERP systémem a e-shopem postavený na Django, Cel
 
 ## Architektura
 
+Modul `integrator` je strukturován podle hexagonální (ports & adapters) architektury:
+
 ```
-┌──────────────┐      ┌────────────────────────────────────────────────────┐
-│ erp_data.json│─────▶│  Celery Pipeline (chain)                          │
-│  (ERP data)  │      │                                                    │
-└──────────────┘      │  1. load_and_validate  ─▶  parsování + deduplikace │
-                      │  2. transform          ─▶  DPH, stock, barva      │
-                      │  3. delta_sync         ─▶  POST/PATCH do API      │
-                      └──────────┬──────────────────────┬──────────────────┘
-                                 │                      │
-                      ┌──────────▼──────┐    ┌──────────▼──────────┐
-                      │  Redis          │    │  E-shop API         │
-                      │  (sync state +  │    │  POST /products/    │
-                      │   Celery broker)│    │  PATCH /products/sk/│
-                      └──────────┬──────┘    └─────────────────────┘
-                                 │
-                      ┌──────────▼──────┐
-                      │  PostgreSQL     │
-                      │  (fallback      │
-                      │   sync state)   │
-                      └─────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Celery Pipeline (chain)                                            │
+│                                                                     │
+│  load_and_validate  ──▶  transform  ──▶  delta_sync                │
+│  (tasks.py)              (tasks.py)      (tasks.py)                │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ volá
+                ┌──────────────▼──────────────┐
+                │  Domain Layer               │
+                │  domain.py                  │
+                │                             │
+                │  transform_products()        │
+                │  orchestrate_sync()          │
+                │  HashDeltaStrategy           │
+                │  TokenBucketRateLimiter      │
+                │  SyncSummary                 │
+                └──────┬──────────────┬────────┘
+                       │ ports.py     │
+              SyncStatePort      EshopPort
+                       │              │
+          ┌────────────▼──┐    ┌──────▼────────────┐
+          │  SyncState-   │    │  EshopAPIClient   │
+          │  Manager      │    │  (adapters.py)    │
+          │  (adapters.py)│    │                   │
+          └──────┬────────┘    └──────┬────────────┘
+                 │                    │
+        ┌────────▼──────┐    ┌────────▼──────┐
+        │  Redis        │    │  E-shop API   │
+        │  (primary)    │    │  POST/PATCH   │
+        └────────┬──────┘    └───────────────┘
+                 │ fallback
+        ┌────────▼──────┐
+        │  PostgreSQL   │
+        │  SyncRecord   │
+        └───────────────┘
 ```
 
-### Komponenty
+### Vrstvy
 
-- **`integrator/tasks.py`** — Celery tasky zapojené do pipeline přes `chain`:
-  1. `load_and_validate` — parsuje JSON, odstraní záznamy bez `id`, sloučí duplicity
-  2. `transform` — přidá DPH (×1.21), sečte skladové zásoby, doplní barvu (`"N/A"`)
-  3. `delta_sync` — porovná hashe s uloženým stavem, pošle jen změněné produkty
+**`integrator/ports.py`** — čisté Python `Protocol` rozhraní bez závislostí na infrastruktuře:
+- `EshopPort` — kontrakt pro odesílání produktů do e-shopu
+- `SyncStatePort` — kontrakt pro čtení a zápis stavu synchronizace
 
-- **`integrator/services.py`** — business logika:
-  - `transform_products` — transformační pravidla (DPH, stock, barva)
-  - `HashDeltaStrategy` — SHA-256 hash pro detekci změn
-  - `SyncStateManager` — správa sync stavu v Redis (primární) + PostgreSQL (fallback)
-  - `TokenBucketRateLimiter` — dodržení limitu 5 req/s
-  - `orchestrate_sync` — orchestrace celé synchronizace
+**`integrator/domain.py`** — čistá doménová logika bez Django/Redis/requests:
+- `transform_products` — DPH (×1.21), agregace skladu, barva (`"N/A"`)
+- `orchestrate_sync` — delta sync orchestrace přes porty
+- `HashDeltaStrategy` — SHA-256 hash pro detekci změn
+- `TokenBucketRateLimiter` — token bucket s injektovatelným clockem (neblokuje — vrací wait time)
+- `SyncSummary` — TypedDict výsledku synchronizace
 
-- **`integrator/clients.py`** — `EshopAPIClient` s rate limitingem a retry logikou při HTTP 429
+**`integrator/adapters.py`** — infrastrukturní adaptéry implementující porty:
+- `EshopAPIClient` — HTTP klient s rate limitingem a retry logikou při HTTP 429
+- `SyncStateManager` — Redis (primární) + PostgreSQL (fallback) správa sync stavu
 
-- **`integrator/models.py`** — `SyncRecord` model pro perzistentní sync stav v PostgreSQL
+**`integrator/tasks.py`** — Celery tasky zapojené do pipeline přes `chain`:
+1. `load_and_validate` — parsuje JSON, odstraní záznamy bez `id`, sloučí duplicity (last wins)
+2. `transform` — deleguje na `transform_products`
+3. `delta_sync` — sestaví závislosti a deleguje na `orchestrate_sync`
 
-- **`integrator/views.py`** — mock endpoint e-shop API simulující reálné chování (429, 500, timeouty)
+**`integrator/models.py`** — `SyncRecord` Django model pro perzistentní sync stav v PostgreSQL
+
+**`integrator/views.py`** — mock endpoint e-shop API simulující reálné chování (429, 500, timeouty)
 
 ### Delta Sync
 
-Produkty se odesílají jen pokud se změnily od poslední synchronizace. Detekce změn funguje přes SHA-256 hash kanonické JSON reprezentace produktu. Stav se ukládá primárně do Redis, sekundárně do PostgreSQL jako fallback.
+Produkty se odesílají jen pokud se změnily od poslední synchronizace. Detekce změn funguje přes SHA-256 hash kanonické JSON reprezentace produktu. Stav se ukládá primárně do Redis; při Redis miss se provede fallback do PostgreSQL a Redis se obnoví.
 
 ### Rate Limiting & Retry
 
-E-shop API má limit 5 req/s. Klient používá token bucket rate limiter a při HTTP 429 čeká dobu z hlavičky `Retry-After` a provede retry (viz. Možná vylepšení bod 1.).
+E-shop API má limit 5 req/s. `TokenBucketRateLimiter` v doménové vrstvě počítá potřebný wait time (nevolá `sleep` — to je zodpovědnost adaptéru). `EshopAPIClient` při HTTP 429 čeká dobu z hlavičky `Retry-After` a provede retry (max 3 pokusy).
 
 ## Spuštění
 
@@ -84,9 +108,19 @@ docker-compose exec web python manage.py json_file_sync --json-file /app/erp_dat
 
 ## Testy
 
+Mimo Docker (bez PostgreSQL — DB testy se přeskočí):
+
 ```bash
-docker-compose exec web pytest
+python -m pytest integrator/tests/ --tb=short -q
 ```
+
+Uvnitř Docker (včetně DB testů):
+
+```bash
+docker compose run web python -m pytest -v
+```
+
+DB testy se automaticky přeskočí pokud PostgreSQL není dostupný (TCP socket check při collection time).
 
 ## Technologie
 
@@ -95,12 +129,12 @@ docker-compose exec web pytest
 - Celery + Redis (broker + sync state)
 - PostgreSQL (databáze + fallback sync state)
 - requests (HTTP klient)
+- fakeredis (in-memory Redis pro testy)
 - pytest + hypothesis + responses (testy)
-
 
 ## Možná vylepšení / diskuze
 
-1. **Lepší retry logika (tenacity/urllib3/task)** — Současná retry logika při HTTP 429 čeká fixní dobu z `Retry-After` hlavičky (s fallbak na default 1s). Exponenciální backoff s knihovnou tenacity, urllib3 nebo separatni (make request) task s Retry zajistí robustnější chování při opakovaných selháních a sníží zátěž na API. Tento bod ma ovšem komplexní logiku, která závisí na znalosti chování a požadavků obou integrovaných apps.
+1. **Lepší retry logika (tenacity/urllib3/task)** — Současná retry logika při HTTP 429 čeká fixní dobu z `Retry-After` hlavičky (s fallback na default 1s). Exponenciální backoff s knihovnou tenacity, urllib3 nebo separátní (make request) task s Retry zajistí robustnější chování při opakovaných selháních a sníží zátěž na API. Tento bod má ovšem komplexní logiku, která závisí na znalosti chování a požadavků obou integrovaných apps.
 
 2. **Přesun ESHOP_API_KEY do environment proměnné** — API klíč je aktuálně uložen v Django settings souboru. Přesun do environment proměnné zvýší bezpečnost a umožní snadnější rotaci klíčů bez změny kódu.
 
@@ -111,5 +145,5 @@ docker-compose exec web pytest
 5. **Strukturované logování pomocí structlog** — Přechod na structlog umožní strojově čitelné logy (JSON formát), snadnější filtrování a agregaci v log management nástrojích (ELK, Datadog).
 
 6. **Metriky a observabilita (Celery signals, Prometheus)** — Přidání metrik pomocí Celery signals a Prometheus exporteru umožní sledovat dobu běhu tasků, počet synchronizovaných produktů, chybovost a stav pipeline v reálném čase.
-   
-7. **Decoupling/Boundaries** - například k oddělení zavislosti services na django ORM, Redis, atd
+
+7. **SyncRecordPort abstrakce** — `SyncStateManager` aktuálně importuje `SyncRecord` přímo (záměrné zjednodušení). Zavedení `SyncRecordPort` protokolu by plně oddělilo doménovou vrstvu od Django ORM.
