@@ -6,23 +6,28 @@ import responses
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from integrator.clients import EshopAPIClient
+from integrator.adapters import EshopAPIClient
 
 BASE_URL = "https://api.fake-eshop.cz/v1/products/"
 
 sku_strategy = st.from_regex(r"[A-Za-z0-9_-]{1,20}", fullmatch=True)
 
-product_strategy = st.fixed_dictionaries({
-    "sku": sku_strategy,
-    "title": st.text(min_size=1, max_size=50),
-    "price_vat_incl": st.floats(min_value=0, max_value=15000, allow_nan=False, allow_infinity=False),
-    "stock_quantity": st.integers(min_value=0, max_value=9999),
-    "color": st.text(min_size=1, max_size=20),
-})
+product_strategy = st.fixed_dictionaries(
+    {
+        "sku": sku_strategy,
+        "title": st.text(min_size=1, max_size=50),
+        "price_vat_incl": st.floats(
+            min_value=0, max_value=15000, allow_nan=False, allow_infinity=False
+        ),
+        "stock_quantity": st.integers(min_value=0, max_value=9999),
+        "color": st.text(min_size=1, max_size=20),
+    }
+)
 
 
 # -- Property 9: Volba HTTP metody (POST vs PATCH) --
 # Feature: erp-eshop-sync, Property 9: Volba HTTP metody (POST vs PATCH)
+
 
 @responses.activate
 @given(product=product_strategy, is_update=st.booleans())
@@ -53,6 +58,7 @@ def test_property_http_method_selection(product: dict, is_update: bool) -> None:
 
 # -- Property 10: Rate limiting --
 # Feature: erp-eshop-sync, Property 10: Rate limiting
+
 
 @responses.activate
 @given(n=st.integers(min_value=2, max_value=10))
@@ -88,17 +94,22 @@ def test_property_rate_limiting(n: int) -> None:
 
 # -- Unit test: Retry on 429 with Retry-After header --
 
+
 @responses.activate
 def test_retry_on_429_with_retry_after() -> None:
     """When API returns 429, client must wait Retry-After and retry."""
     responses.add(
-        responses.POST, BASE_URL,
-        json={"error": "rate limited"}, status=429,
+        responses.POST,
+        BASE_URL,
+        json={"error": "rate limited"},
+        status=429,
         headers={"Retry-After": "0.1"},
     )
     responses.add(
-        responses.POST, BASE_URL,
-        json={"id": "SKU-001"}, status=201,
+        responses.POST,
+        BASE_URL,
+        json={"id": "SKU-001"},
+        status=201,
     )
 
     client = EshopAPIClient(base_url=BASE_URL, api_key="test-key", max_rps=1000)
@@ -121,12 +132,15 @@ def test_retry_on_429_with_retry_after() -> None:
 
 # -- Unit test: Error logging on 500 --
 
+
 @responses.activate
 def test_error_logging_on_500(caplog) -> None:
     """When API returns 500, client must log error with SKU and status code."""
     responses.add(
-        responses.PATCH, f"{BASE_URL}SKU-ERR/",
-        json={"error": "internal"}, status=500,
+        responses.PATCH,
+        f"{BASE_URL}SKU-ERR/",
+        json={"error": "internal"},
+        status=500,
     )
 
     client = EshopAPIClient(base_url=BASE_URL, api_key="test-key", max_rps=1000)
@@ -144,3 +158,74 @@ def test_error_logging_on_500(caplog) -> None:
     assert error is not None
     assert "SKU-ERR" in error
     assert "500" in error
+
+
+# -- Unit test: Retry on 429 with Retry-After header (adapters.EshopAPIClient) --
+# Requirements: 4.4
+
+
+@responses.activate
+def test_adapters_retry_on_429_with_retry_after() -> None:
+    """adapters.EshopAPIClient: 429 → wait Retry-After → retry succeeds."""
+    from integrator.adapters import EshopAPIClient as AdaptersClient
+
+    responses.add(
+        responses.POST,
+        BASE_URL,
+        json={"error": "rate limited"},
+        status=429,
+        headers={"Retry-After": "0.01"},
+    )
+    responses.add(
+        responses.POST,
+        BASE_URL,
+        json={"id": "SKU-001"},
+        status=201,
+    )
+
+    client = AdaptersClient(base_url=BASE_URL, api_key="test-key", max_rps=1000)
+    product = {
+        "sku": "SKU-001",
+        "title": "Test",
+        "price_vat_incl": 121.0,
+        "stock_quantity": 5,
+        "color": "blue",
+    }
+
+    data, error = client.send_product(product, is_update=False)
+
+    assert error is None
+    assert data == {"id": "SKU-001"}
+    assert len(responses.calls) == 2
+    assert responses.calls[0].response.status_code == 429
+    assert responses.calls[1].response.status_code == 201
+
+
+@responses.activate
+def test_adapters_retry_exhausted_returns_error() -> None:
+    """adapters.EshopAPIClient: 3× 429 → returns error after max retries."""
+    from integrator.adapters import EshopAPIClient as AdaptersClient
+
+    for _ in range(3):
+        responses.add(
+            responses.POST,
+            BASE_URL,
+            json={"error": "rate limited"},
+            status=429,
+            headers={"Retry-After": "0.01"},
+        )
+
+    client = AdaptersClient(base_url=BASE_URL, api_key="test-key", max_rps=1000)
+    product = {
+        "sku": "SKU-MAX",
+        "title": "Test",
+        "price_vat_incl": 121.0,
+        "stock_quantity": 5,
+        "color": "blue",
+    }
+
+    data, error = client.send_product(product, is_update=False)
+
+    assert data is None
+    assert error is not None
+    assert "Max retries" in error or "SKU-MAX" in error

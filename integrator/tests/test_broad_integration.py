@@ -14,7 +14,7 @@ import responses
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from integrator.clients import EshopAPIClient
+from integrator.adapters import EshopAPIClient
 from integrator.tasks import delta_sync, load_and_validate, transform
 
 # ---------------------------------------------------------------------------

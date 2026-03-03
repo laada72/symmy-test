@@ -7,9 +7,9 @@ import fakeredis
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from integrator.services import (
+from integrator.adapters import SyncStateManager
+from integrator.domain import (
     HashDeltaStrategy,
-    SyncStateManager,
     TokenBucketRateLimiter,
     orchestrate_sync,
     transform_products,
@@ -407,7 +407,7 @@ def test_property_dual_write_sync_state(sku: str, product: dict) -> None:
     content_hash = manager.strategy.compute_hash(product)
 
     mock_record = MagicMock()
-    with patch("integrator.models.SyncRecord") as MockSyncRecord:
+    with patch("integrator.adapters.SyncRecord") as MockSyncRecord:
         MockSyncRecord.objects.update_or_create.return_value = (mock_record, True)
         manager.mark_synced(sku, content_hash)
 
@@ -420,10 +420,10 @@ def test_property_dual_write_sync_state(sku: str, product: dict) -> None:
 
         # Verify PostgreSQL update_or_create was called with correct args
         MockSyncRecord.objects.update_or_create.assert_called_once()
-        call_kwargs = MockSyncRecord.objects.update_or_create.call_args
-        assert call_kwargs[1]["sku"] == sku
-        assert call_kwargs[1]["defaults"]["content_hash"] == content_hash
-        assert call_kwargs[1]["defaults"]["synced"] is True
+        call_kwargs = MockSyncRecord.objects.update_or_create.call_args.kwargs
+        assert call_kwargs["sku"] == sku
+        assert call_kwargs["defaults"]["content_hash"] == content_hash
+        assert call_kwargs["defaults"]["synced"] is True
 
 
 # -- Property 8: PostgreSQL fallback s obnovou Redis --
@@ -457,8 +457,9 @@ def test_property_postgresql_fallback_with_redis_restoration(
     mock_record.content_hash = content_hash
     mock_record.last_synced = last_synced
 
-    with patch("integrator.models.SyncRecord") as MockSyncRecord:
+    with patch("integrator.adapters.SyncRecord") as MockSyncRecord:
         MockSyncRecord.objects.get.return_value = mock_record
+        MockSyncRecord.DoesNotExist = Exception
 
         result = manager.was_previously_synced(sku)
 

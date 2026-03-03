@@ -9,34 +9,31 @@ import redis
 from celery import chain, shared_task
 from django.conf import settings
 
-from integrator.clients import EshopAPIClient
-from integrator.services import (
-    SyncStateManager,
-    orchestrate_sync,
-    transform_products,
-)
+from integrator.adapters import EshopAPIClient, SyncStateManager
+from integrator.domain import orchestrate_sync, transform_products
+from integrator.ports import EshopPort, SyncStatePort
 
-DependencyFactory = Callable[[], tuple[SyncStateManager, EshopAPIClient]]
+DependencyFactory = Callable[[], tuple[SyncStatePort, EshopPort]]
 
 logger = logging.getLogger(__name__)
 
 
 @shared_task
 def load_and_validate(raw_json: str) -> list[dict]:
-    """Načte a zvaliduje surová JSON data z ERP systému.
+    """Load and validate raw ERP JSON data.
 
-    Parsuje JSON řetězec, přeskočí záznamy bez klíče ``id`` (s logováním),
-    a sloučí duplicity — při duplicitním ``id`` vyhrává poslední výskyt.
+    Skips records missing the ``id`` field (with WARNING log), deduplicates
+    by ``id`` (last occurrence wins).
 
     Args:
-        raw_json: Surový JSON řetězec obsahující pole produktových objektů.
+        raw_json: Raw JSON string containing an array of product objects.
 
     Returns:
-        Seznam validních produktových slovníků s unikátními ``id``.
+        List of valid product dicts with unique ``id`` values.
 
     Raises:
-        json.JSONDecodeError: Pokud vstup není validní JSON.
-        TypeError: Pokud vstup není správného typu.
+        json.JSONDecodeError: If input is not valid JSON.
+        TypeError: If input is wrong type.
     """
     try:
         data: list[dict] = json.loads(raw_json)
@@ -80,16 +77,16 @@ def load_and_validate(raw_json: str) -> list[dict]:
 
 @shared_task
 def transform(raw_products: list[dict]) -> list[dict]:
-    """Aplikuje business pravidla na surové produkty z ERP.
+    """Apply business rules to raw ERP products.
 
-    Deleguje na ``transform_products`` — vypočítá cenu s DPH,
-    agreguje skladové zásoby a extrahuje barvu z atributů.
+    Delegates to ``transform_products`` — computes VAT price,
+    aggregates stock, extracts color from attributes.
 
     Args:
-        raw_products: Seznam surových produktových slovníků z ERP.
+        raw_products: List of raw product dicts from ERP.
 
     Returns:
-        Seznam transformovaných produktů připravených k synchronizaci.
+        List of transformed products ready for sync.
     """
     result = transform_products(raw_products)
     logger.info(
@@ -103,25 +100,26 @@ def delta_sync(
     transformed_products: list[dict],
     dependency_factory: DependencyFactory | None = None,
 ) -> dict:
-    """Provede delta synchronizaci transformovaných produktů do e-shopu.
+    """Delta-sync transformed products to the e-shop.
 
-    Vytvoří potřebné závislosti (Redis klient, SyncStateManager, EshopAPIClient)
-    a deleguje na ``orchestrate_sync``. Závislosti lze injektovat přes
-    ``dependency_factory`` pro testování.
+    Creates dependencies (Redis, SyncStateManager, EshopAPIClient) and
+    delegates to ``orchestrate_sync``. Dependencies can be injected via
+    ``dependency_factory`` for testing.
 
     Args:
-        transformed_products: Seznam transformovaných produktů z předchozího kroku.
-        dependency_factory: Volitelná tovární funkce vracející tuple
-            ``(SyncStateManager, EshopAPIClient)``. Pokud není zadána,
-            vytvoří se výchozí instance z nastavení aplikace.
+        transformed_products: Transformed products from the previous pipeline step.
+        dependency_factory: Optional factory returning ``(SyncStatePort, EshopPort)``.
+            If omitted, creates default instances from Django settings.
+            NOTE: Celery serialises task args as JSON, so this parameter cannot
+            be passed via ``.delay()`` or chain — it is for direct test calls only.
 
     Returns:
-        Slovník se souhrnem synchronizace (viz ``orchestrate_sync``).
+        Sync summary dict (see ``orchestrate_sync``).
     """
     if dependency_factory is None:
         redis_client = redis.Redis.from_url(settings.CELERY_BROKER_URL)
-        manager = SyncStateManager(redis_client)
-        api_client = EshopAPIClient()
+        manager: SyncStatePort = SyncStateManager(redis_client)
+        api_client: EshopPort = EshopAPIClient()
     else:
         manager, api_client = dependency_factory()
 
@@ -131,18 +129,15 @@ def delta_sync(
 
 
 def run_sync_pipeline(raw_json: str):
-    """Spustí kompletní synchronizační pipeline jako Celery chain.
+    """Run the complete sync pipeline as a Celery chain.
 
-    Pipeline se skládá ze tří kroků:
-    1. ``load_and_validate`` — parsování a validace JSON dat
-    2. ``transform`` — aplikace business pravidel
-    3. ``delta_sync`` — delta synchronizace do e-shopu
+    Pipeline: load_and_validate → transform → delta_sync
 
     Args:
-        raw_json: Surový JSON řetězec s produktovými daty z ERP.
+        raw_json: Raw JSON string with ERP product data.
 
     Returns:
-        ``celery.result.AsyncResult`` s ID spuštěného tasku.
+        ``celery.result.AsyncResult`` for the running task.
     """
     return chain(
         load_and_validate.s(raw_json),
