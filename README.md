@@ -111,3 +111,5 @@ docker-compose exec web pytest
 5. **Strukturované logování pomocí structlog** — Přechod na structlog umožní strojově čitelné logy (JSON formát), snadnější filtrování a agregaci v log management nástrojích (ELK, Datadog).
 
 6. **Metriky a observabilita (Celery signals, Prometheus)** — Přidání metrik pomocí Celery signals a Prometheus exporteru umožní sledovat dobu běhu tasků, počet synchronizovaných produktů, chybovost a stav pipeline v reálném čase.
+   
+7. **Decoupling/Boundaries** - například k oddělení zavislosti services na django ORM, Redis, atd
